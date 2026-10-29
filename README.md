@@ -46,25 +46,26 @@ Other details:
 - If notes trigger by accident, lower **Sensitivity**. If presses are missed, raise it.
 - On iPhone/iPad, if you hear nothing, check the volume. The app asks Safari to play even in silent mode, but older iOS versions ignore that.
 
-## Run it
+## Put it online (no commands needed)
 
-Browsers only allow camera access on `https://` or `localhost`.
+Browsers only allow the camera on `https://` pages, so the app is published with
+GitHub Pages. Everything is done on the GitHub website:
 
-**Locally (laptop):**
+1. **Make the repository public** (GitHub Pages is free only for public repos):
+   repository → **Settings** → **General** → scroll to the bottom (**Danger Zone**) →
+   **Change visibility** → **Make public** → confirm.
+2. **Turn on GitHub Pages:** repository → **Settings** → **Pages** (left menu) →
+   under **Build and deployment** set **Source** to **Deploy from a branch** →
+   pick the branch with the app (for example `main`) and the folder **/ (root)** → **Save**.
+3. Wait 1–2 minutes and refresh the Pages settings page. It shows
+   **"Your site is live at https://97andrea97.github.io/virtual-piano/"**.
+4. Open that link on your iPad, phone or laptop. In Safari, *Share → Add to Home Screen*
+   makes it look like an app.
 
-```bash
-npm start          # or: python3 -m http.server 8080
-```
+Every later change pushed to that branch goes live by itself within a couple of minutes.
 
-Then open http://localhost:8080.
-
-**On an iPad / phone:** deploy it to GitHub Pages so it's served over HTTPS:
-
-1. Merge this into `main`.
-2. In the repository, go to **Settings → Pages → Build and deployment → Source: GitHub Actions**.
-3. The workflow in `.github/workflows/pages.yml` runs the tests and publishes the site to
-   `https://<user>.github.io/virtual-piano/`.
-4. Open that URL in Safari or Chrome. Optionally use *Share → Add to Home Screen*.
+Optional, for developers: run it locally with `npm start` (or `python3 -m http.server 8080`)
+and open http://localhost:8080.
 
 ## Development
 
