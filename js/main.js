@@ -6,18 +6,19 @@ import { Camera, HandDetector } from './vision.js';
 
 const FINGER_COLORS = ['#ff6b6b', '#ffb347', '#ffe066', '#5ce1a5', '#5cb8ff'];
 const POINTER_COLOR = '#c08cff';
-const HAND_CONNECTIONS = [
-  [0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8], [5, 9], [9, 10], [10, 11], [11, 12],
-  [9, 13], [13, 14], [14, 15], [15, 16], [13, 17], [0, 17], [17, 18], [18, 19], [19, 20],
-];
+// Hand skeleton: the palm outline, then one joint chain per finger (thumb..pinky).
+const PALM = [0, 1, 5, 9, 13, 17, 0];
+const FINGER_CHAINS = [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16], [17, 18, 19, 20]];
 // Keyboard placement as fractions of the screen: cx/w of the width, fy/d of the height.
 const DEFAULT_PLACEMENT = {
   landscape: { cx: 0.5, fy: 0.94, w: 0.84, d: 0.55 },
   portrait: { cx: 0.5, fy: 0.9, w: 0.94, d: 0.3 },
 };
 const DEFAULT_TILT = 55; // degrees
-const HOVER_SLACK = 0.35; // fingertips this far (in key lengths) behind/in front of the keys still aim at them
 const STORAGE_KEY = 'air-piano-settings-v2';
+// Bumped when the meaning of a stored setting changes (v3: new press detection
+// thresholds, skeleton shown by default).
+const SETTINGS_VERSION = 3;
 
 // ---------------------------------------------------------------- settings
 
@@ -29,7 +30,8 @@ const defaults = {
   volume: 0.8,
   opacity: 0.85,
   useThumbs: true,
-  skeleton: false,
+  skeleton: true,
+  debug: false,
   labels: true,
   mirror: true,
   facingMode: 'user',
@@ -40,9 +42,13 @@ const defaults = {
 function loadSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-    return { ...defaults, ...saved, placement: { ...DEFAULT_PLACEMENT, ...saved.placement } };
+    if (saved.version !== SETTINGS_VERSION) {
+      delete saved.sensitivity;
+      delete saved.skeleton;
+    }
+    return { ...defaults, ...saved, placement: { ...DEFAULT_PLACEMENT, ...saved.placement }, version: SETTINGS_VERSION };
   } catch {
-    return { ...defaults };
+    return { ...defaults, version: SETTINGS_VERSION };
   }
 }
 
@@ -150,9 +156,11 @@ function applyEvents(events) {
       sourceNotes.set(e.id, { note: e.note, color });
       ripples.push({ x: e.x, y: e.y, t: performance.now(), color, note: e.note });
       notesPlayed++;
-    } else {
+    } else if (e.type === 'off') {
       audio.noteOff(e.note, e.id);
       sourceNotes.delete(e.id);
+    } else if (e.type === 'ignored' && settings.debug) {
+      ripples.push({ x: e.x, y: e.y, t: performance.now(), reason: e.reason });
     }
   }
 }
@@ -253,15 +261,14 @@ function animateKeys(pressed, dt) {
   }
 }
 
-/** The key each fingertip is aiming at (shown as a faint highlight). */
+/** The key each fingertip is aiming at, i.e. the key a press would play (shown as a faint highlight). */
 function hoveredKeys() {
   const hovered = new Map();
   if (editing) return hovered;
   for (const hand of hands) {
-    FINGERTIPS.forEach((tipIndex, f) => {
-      if (f === 0 && !settings.useThumbs) return;
-      const p = hand.points[tipIndex];
-      const key = keyboard.hitTest(p.x, p.y, HOVER_SLACK);
+    FINGERTIPS.forEach((_, f) => {
+      const state = detector.finger(`${hand.id}:${f}`);
+      const key = state?.stroke && state.phase === 'stroke' ? state.stroke.aim : state?.aim;
       if (key && !hovered.has(key.note)) hovered.set(key.note, FINGER_COLORS[f]);
     });
   }
@@ -405,16 +412,7 @@ function drawLabels(g, pressed) {
 
 function drawHands() {
   for (const hand of hands) {
-    if (settings.skeleton) {
-      ctx.strokeStyle = 'rgba(255,255,255,0.55)';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      for (const [a, b] of HAND_CONNECTIONS) {
-        ctx.moveTo(hand.points[a].x, hand.points[a].y);
-        ctx.lineTo(hand.points[b].x, hand.points[b].y);
-      }
-      ctx.stroke();
-    }
+    if (settings.skeleton) drawSkeleton(hand.points);
     FINGERTIPS.forEach((tipIndex, f) => {
       if (f === 0 && !settings.useThumbs) return;
       const p = hand.points[tipIndex];
@@ -442,12 +440,52 @@ function drawHands() {
   }
 }
 
+function drawSkeleton(pts) {
+  const chain = (indices, color, width) => {
+    // Dark outline under a colored line keeps the skeleton visible on any background.
+    ctx.beginPath();
+    indices.forEach((i, n) => (n ? ctx.lineTo(pts[i].x, pts[i].y) : ctx.moveTo(pts[i].x, pts[i].y)));
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+    ctx.lineWidth = width + 3;
+    ctx.stroke();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.stroke();
+  };
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  chain(PALM, 'rgba(255,255,255,0.9)', 3);
+  FINGER_CHAINS.forEach((indices, f) => {
+    if (f === 0 && !settings.useThumbs) return;
+    chain(indices, FINGER_COLORS[f], 3.5);
+  });
+  for (let i = 0; i < pts.length; i++) {
+    if (FINGERTIPS.includes(i)) continue;
+    ctx.beginPath();
+    ctx.arc(pts[i].x, pts[i].y, 3.2, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+}
+
 function drawRipples(now) {
   for (let i = ripples.length - 1; i >= 0; i--) {
     const rp = ripples[i];
-    const age = (now - rp.t) / 450;
+    const age = (now - rp.t) / (rp.reason ? 900 : 450);
     if (age >= 1) {
       ripples.splice(i, 1);
+      continue;
+    }
+    if (rp.reason) {
+      // Debug: why a movement did not play.
+      ctx.font = '600 12px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = withAlpha('#d0d6de', 1 - age);
+      ctx.fillText(`✕ ${rp.reason}`, rp.x, rp.y + 14);
       continue;
     }
     ctx.beginPath();
@@ -669,6 +707,7 @@ function syncForm() {
   $('#set-tilt').value = String(settings.tilt);
   $('#set-thumbs').checked = settings.useThumbs;
   $('#set-skeleton').checked = settings.skeleton;
+  $('#set-debug').checked = settings.debug;
   $('#set-labels').checked = settings.labels;
   $('#set-mirror').checked = settings.mirror;
 }
@@ -716,7 +755,7 @@ $('#set-thumbs').addEventListener('change', (e) => {
   saveSettings();
 });
 
-for (const [id, key] of [['#set-skeleton', 'skeleton'], ['#set-labels', 'labels'], ['#set-mirror', 'mirror']]) {
+for (const [id, key] of [['#set-skeleton', 'skeleton'], ['#set-labels', 'labels'], ['#set-mirror', 'mirror'], ['#set-debug', 'debug']]) {
   $(id).addEventListener('change', (e) => {
     settings[key] = e.target.checked;
     if (key === 'mirror') {

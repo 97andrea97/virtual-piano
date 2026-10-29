@@ -21,15 +21,24 @@ camera ─► MediaPipe (21 landmarks per hand, up to 2 hands)
 ### When does a key play?
 
 A single camera can't measure true depth, so the app can't tell when a finger
-"touches" a key. Instead it looks for the **movement** of a key press: a quick,
-short downward tap of one finger. Just having fingertips over the keys never
+"touches" a key. Instead it looks for the **intention** of a key press: a finger
+that aims at a key, moves down quickly and then **lands** (stops abruptly), like
+on a real piano. Where the fingertips happen to be, or what they pass over, never
 plays anything.
 
-For every finger the app tracks how far the fingertip is below its own knuckle,
-measured in hand sizes so it doesn't matter how close you are to the camera. A
-note plays when that value grows quickly (a downward stroke of about 1/6 of a
-hand size within 0.3 s). The note plays on the key under the fingertip and is
-released when the finger lifts again.
+How it works, per finger:
+
+1. **Signal:** how far the fingertip is below its own knuckle, measured in hand
+   sizes so it doesn't matter how close you are to the camera.
+2. **Aim:** the key under the fingertip while it hovers. It is "sticky", so it
+   only changes when the tip is clearly inside another key. The aimed key is
+   lightly highlighted, and it's the key that will play.
+3. **Stroke:** a quick downward movement starts. It must reach about 1/11 of a
+   hand size and a minimum speed within 0.35 s.
+4. **Landing:** when the movement suddenly slows down (or goes very deep), the
+   note plays on the key that was aimed at *before* the stroke started. Loudness
+   comes from the stroke speed.
+5. **Release:** lifting the finger again releases the note.
 
 The app ignores movements that aren't key presses:
 
@@ -37,14 +46,19 @@ The app ignores movements that aren't key presses:
 |---|---|
 | Fingers resting or hovering over the keys | nothing |
 | Moving, lowering or sliding the whole hand | nothing (tip and knuckle move together) |
+| Swinging the hand fast | nothing |
 | Tilting the hand at the wrist (all fingers drop together) | nothing (shared movement is subtracted) |
+| A finger sliding sideways across keys while moving down | nothing ("slid") |
+| A finger dragged along by a neighbour's press (weaker stroke) | nothing ("neighbour") |
+| Two or three fingers pressing with similar strength | a chord |
 | Slowly curling a finger | nothing (the stroke must be quick) |
-| Swinging the hand fast | nothing (tracking is unreliable then) |
-| Two or three fingers tapping together | a chord |
 | A small bounce right after releasing | nothing (the finger must lift and press again) |
+| Shaky tracking (poor light) | needs a clearer stroke (automatic noise floor) |
 
-A ring around each fingertip fills up as the finger gets close to a press. This
-shows what the app "feels" and helps when you tune the **Sensitivity** setting.
+A ring around each fingertip fills up as the finger gets close to a press. With
+**Settings → Show why a movement didn't play**, a short label ("neighbour",
+"slid") appears whenever a stroke is ignored. This makes it easier to tune
+**Sensitivity** and to report problems.
 
 ### The 3D keyboard
 
