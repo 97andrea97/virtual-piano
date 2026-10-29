@@ -1,15 +1,19 @@
 // Turns fingertip movement into note on / note off events.
 //
-// Two modes:
-//  - "touch": the keyboard behaves like a surface. A fingertip that crosses the
-//    top edge of the keyboard presses the key under it; lifting it back above
-//    the edge releases it. Sliding sideways inside the keyboard moves to the
-//    neighbouring key (glissando). Works best with the camera looking at a
-//    table from the front, or with hands hovering above the drawn keyboard.
-//  - "tap": the finger has to make a quick downward "press" movement relative
-//    to its own knuckle, like playing a real piano in the air. Moving the whole
-//    hand around never plays anything, only bending a finger does. The key is
-//    the one under (or right below) the fingertip.
+// A note plays only when a finger makes a quick downward "keystroke", not
+// because a fingertip happens to be over a key. For every finger we track how
+// far its tip is below its own knuckle (in hand-size units), and look for a
+// fast drop of that value within a short time window:
+//
+//  - Moving or lowering the whole hand changes tip and knuckle together, so it
+//    never plays.
+//  - Tilting the hand at the wrist moves all fingers together. That shared
+//    movement ("common mode") is subtracted, so only a finger moving on its
+//    own counts. Chords of up to three fingers still work.
+//  - Slow curling is ignored: the drop must happen quickly.
+//  - Presses are ignored while the whole hand is moving fast (tracking is
+//    unreliable then and nobody plays while swinging their hand).
+//  - After a press the finger has to lift again before it can play again.
 //
 // Pure logic: points are in screen pixels, time in seconds.
 
@@ -18,25 +22,45 @@ export const FINGER_BASES = [2, 5, 9, 13, 17];
 export const FINGER_NAMES = ['thumb', 'index', 'middle', 'ring', 'pinky'];
 
 const WRIST = 0;
+const INDEX_MCP = 5;
 const MIDDLE_MCP = 9;
+const PINKY_MCP = 17;
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const lerp = (a, b, k) => a + (b - a) * k;
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+/** Second smallest value (or 0 when there are fewer than 3 values). */
+function commonMode(values) {
+  if (values.length < 3) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return Math.max(0, sorted[1]);
+}
+
+/**
+ * Hand size in pixels that stays stable when the hand is foreshortened:
+ * palm width when fingers point at the camera, palm length when the hand is
+ * seen from the side.
+ */
+export function handScale(points) {
+  return Math.max(dist(points[INDEX_MCP], points[PINKY_MCP]), 0.8 * dist(points[WRIST], points[MIDDLE_MCP]), 1e-6);
+}
 
 export class PressDetector {
   /**
    * @param {object} opts
-   * @param {'touch'|'tap'} opts.mode
-   * @param {number} opts.sensitivity 1 (needs big, fast movements) .. 10 (very sensitive)
+   * @param {number} opts.sensitivity 1 (needs big, fast strokes) .. 10 (very light strokes)
    * @param {boolean} opts.useThumbs
    * @param {number} opts.lostGrace seconds a finger may disappear before its note is released
+   * @param {number} opts.window seconds within which the downward stroke has to happen
    */
-  constructor({ mode = 'touch', sensitivity = 5, useThumbs = true, lostGrace = 0.15 } = {}) {
-    this.mode = mode;
+  constructor({ sensitivity = 5, useThumbs = true, lostGrace = 0.15, window = 0.3 } = {}) {
     this.sensitivity = sensitivity;
     this.useThumbs = useThumbs;
     this.lostGrace = lostGrace;
+    this.window = window;
     this.fingers = new Map();
+    this.hands = new Map();
   }
 
   /** Threshold multiplier: 1 at sensitivity 5, larger (stricter) below, smaller above. */
@@ -44,11 +68,14 @@ export class PressDetector {
     return Math.pow(2, (5 - this.sensitivity) / 4);
   }
 
-  setMode(mode) {
-    if (mode === this.mode) return [];
-    const events = this.releaseAll();
-    this.mode = mode;
-    return events;
+  /** Downward stroke (hand-size units) needed to press. */
+  get depthThreshold() {
+    return 0.16 * this.strictness;
+  }
+
+  /** Downward speed (hand-size units per second) needed to press. */
+  get speedThreshold() {
+    return 0.8 * this.strictness;
   }
 
   /**
@@ -60,35 +87,74 @@ export class PressDetector {
   update(hands, keyboard, t) {
     const events = [];
     const seen = new Set();
+    const seenHands = new Set();
 
     for (const hand of hands) {
-      const scale = Math.max(1e-6, Math.hypot(
-        hand.points[MIDDLE_MCP].x - hand.points[WRIST].x,
-        hand.points[MIDDLE_MCP].y - hand.points[WRIST].y,
-      ));
+      seenHands.add(hand.id);
+      const scale = handScale(hand.points);
+      const handSpeed = this.#handSpeed(hand, scale, t);
+
+      // 1. Update each finger's signal and history.
+      const states = [];
       for (let f = 0; f < FINGERTIPS.length; f++) {
         if (f === 0 && !this.useThumbs) continue;
         const id = `${hand.id}:${f}`;
         seen.add(id);
         const tip = hand.points[FINGERTIPS[f]];
         const base = hand.points[FINGER_BASES[f]];
+        // How far the tip is below its knuckle; grows when the finger presses down.
+        const rel = (tip.y - base.y) / scale;
         let s = this.fingers.get(id);
-        const fresh = !s;
-        if (fresh) {
-          s = { id, finger: f, note: null, x: tip.x, y: tip.y, t, vy: 0, armed: false };
+        if (!s) {
+          s = { id, finger: f, note: null, history: [], vel: 0, rel, progress: 0 };
           this.fingers.set(id, s);
         }
-        const dt = t - s.t;
-        if (dt > 0) {
-          s.vy = lerp(s.vy, (tip.y - s.y) / dt, 0.6);
-        }
-        s.x = tip.x;
-        s.y = tip.y;
+        const dt = t - (s.t ?? t);
+        if (dt > 0) s.vel = lerp(s.vel, (rel - s.rel) / dt, 0.6);
+        s.rel = rel;
         s.t = t;
         s.lastSeen = t;
+        s.x = tip.x;
+        s.y = tip.y;
+        s.history.push({ t, rel });
+        while (s.history.length > 1 && t - s.history[0].t > this.window) s.history.shift();
+        // Drop since the finger's highest point within the window.
+        s.drop = rel - Math.min(...s.history.map((h) => h.rel));
+        states.push(s);
+      }
 
-        if (this.mode === 'tap') this.#updateTap(s, tip, base, scale, keyboard, dt, fresh, events);
-        else this.#updateTouch(s, tip, keyboard, fresh, events);
+      // 2. Remove what all fingers do together (hand tilting, tracking wobble).
+      const commonDrop = commonMode(states.map((s) => s.drop));
+      const commonVel = commonMode(states.map((s) => s.vel));
+
+      // 3. Decide presses and releases.
+      const depthOn = this.depthThreshold;
+      const speedOn = this.speedThreshold;
+      for (const s of states) {
+        const thumb = s.finger === 0 ? 1.3 : 1; // thumbs are noisier
+        const drop = s.drop - commonDrop;
+        const vel = s.vel - commonVel;
+        s.progress = clamp(drop / (depthOn * thumb), 0, 1);
+
+        if (s.note === null) {
+          if (drop > depthOn * thumb && vel > speedOn * thumb && handSpeed < 2.5) {
+            const key = keyboard.hitTest(s.x, s.y, 0.35);
+            if (key) {
+              s.peak = s.rel;
+              const loud = clamp(0.35 + 0.65 * ((vel / (speedOn * thumb)) - 1) / 3, 0.3, 1);
+              events.push(this.#on(s, key.note, loud));
+            }
+          }
+        } else {
+          s.peak = Math.max(s.peak, s.rel);
+          // Released once the finger lifts a bit from its lowest point.
+          if (s.peak - s.rel > depthOn * 0.4) {
+            events.push(this.#off(s));
+            // Start a fresh stroke from here so a small bounce can't retrigger.
+            s.history = [{ t, rel: s.rel }];
+            s.drop = 0;
+          }
+        }
       }
     }
 
@@ -99,6 +165,7 @@ export class PressDetector {
         this.fingers.delete(id);
       }
     }
+    for (const id of this.hands.keys()) if (!seenHands.has(id)) this.hands.delete(id);
     return events;
   }
 
@@ -108,17 +175,33 @@ export class PressDetector {
       if (s.note !== null) events.push(this.#off(s));
     }
     this.fingers.clear();
+    this.hands.clear();
     return events;
   }
 
-  /** Currently held notes, keyed by finger id. */
-  get activeFingers() {
-    return [...this.fingers.values()].filter((s) => s.note !== null);
+  /** Per-finger state for drawing: progress 0..1 towards a press, and the held note. */
+  finger(id) {
+    return this.fingers.get(id) ?? null;
+  }
+
+  /** Palm speed in hand sizes per second (smoothed). */
+  #handSpeed(hand, scale, t) {
+    const c = hand.points[MIDDLE_MCP];
+    let h = this.hands.get(hand.id);
+    if (!h) {
+      h = { x: c.x, y: c.y, t, speed: 0 };
+      this.hands.set(hand.id, h);
+    }
+    const dt = t - h.t;
+    if (dt > 0) h.speed = lerp(h.speed, Math.hypot(c.x - h.x, c.y - h.y) / scale / dt, 0.5);
+    h.x = c.x;
+    h.y = c.y;
+    h.t = t;
+    return h.speed;
   }
 
   #on(s, note, velocity) {
     s.note = note;
-    s.velocity = velocity;
     return { type: 'on', id: s.id, note, velocity, finger: s.finger, x: s.x, y: s.y };
   }
 
@@ -126,107 +209,5 @@ export class PressDetector {
     const note = s.note;
     s.note = null;
     return { type: 'off', id: s.id, note, finger: s.finger, x: s.x, y: s.y };
-  }
-
-  // ---- touch mode ---------------------------------------------------------
-
-  #updateTouch(s, tip, kb, fresh, events) {
-    const r = kb.rect;
-    const margin = r.h * 0.05 * this.strictness; // hysteresis around the top edge
-    const inside = tip.x >= r.x && tip.x <= r.x + r.w && tip.y > r.y + margin && tip.y <= r.y + r.h;
-
-    // A finger that appears already inside the keyboard (e.g. tracking was lost
-    // for a moment) must lift above the keyboard once before it can play.
-    if (fresh) s.armed = !inside;
-    if (tip.y < r.y + margin) s.armed = true;
-
-    if (s.note === null) {
-      if (inside && s.armed) {
-        const key = kb.hitTest(tip.x, tip.y);
-        if (key) events.push(this.#on(s, key.note, this.#touchVelocity(s.vy / r.h)));
-      }
-      return;
-    }
-
-    const lifted = tip.y < r.y - margin;
-    const left = tip.x < r.x - margin || tip.x > r.x + r.w + margin || tip.y > r.y + r.h * 1.5;
-    if (lifted || left) {
-      events.push(this.#off(s));
-      return;
-    }
-
-    // Slide to a neighbouring key only when the fingertip is clearly inside it,
-    // so a finger resting on a key boundary does not retrigger repeatedly.
-    const y = Math.min(tip.y, r.y + r.h - 1);
-    const x = clamp(tip.x, r.x, r.x + r.w);
-    const key = kb.hitTest(x, Math.max(y, r.y));
-    if (key && key.note !== s.note) {
-      const hx = kb.whiteKeyWidth * 0.15;
-      const hy = r.h * 0.06;
-      const probes = [kb.hitTest(x - hx, y), kb.hitTest(x + hx, y), kb.hitTest(x, y - hy), kb.hitTest(x, y + hy)];
-      if (probes.every((p) => p && p.note === key.note)) {
-        events.push(this.#off(s));
-        events.push(this.#on(s, key.note, s.velocity));
-      }
-    }
-  }
-
-  #touchVelocity(speed) {
-    // speed in keyboard heights per second; a firm press is around 3-4.
-    return clamp(0.3 + (speed - 0.3) * 0.2, 0.3, 1);
-  }
-
-  // ---- tap mode -----------------------------------------------------------
-
-  #updateTap(s, tip, base, scale, kb, dt, fresh, events) {
-    // How far the fingertip is below its knuckle, in hand-size units. Pressing
-    // a key (bending the finger down) makes this grow quickly.
-    const rel = (tip.y - base.y) / scale;
-    if (fresh || dt <= 0) {
-      s.rel = rel;
-      s.baseline = rel;
-      s.relVel = 0;
-      return;
-    }
-    s.relVel = lerp(s.relVel, (rel - s.rel) / dt, 0.6);
-    s.rel = rel;
-
-    const k = this.strictness;
-    const depthOn = 0.12 * k;
-    const velOn = 0.9 * k;
-
-    if (s.note === null) {
-      // Baseline = the finger's lifted "rest" position. It follows upward
-      // movement quickly and downward drift slowly.
-      s.baseline = rel < s.baseline ? lerp(s.baseline, rel, 0.5) : lerp(s.baseline, rel, Math.min(1, dt / 1.0));
-      const depth = rel - s.baseline;
-      if (depth > depthOn && s.relVel > velOn) {
-        const key = this.#tapKey(tip, kb);
-        if (key) {
-          s.peak = rel;
-          events.push(this.#on(s, key.note, clamp(0.3 + (s.relVel - velOn) * 0.15, 0.3, 1)));
-        }
-      }
-      return;
-    }
-
-    s.peak = Math.max(s.peak, rel);
-    const depth = rel - s.baseline;
-    const risen = s.peak - rel;
-    if (depth < depthOn * 0.5 || risen > depthOn * 0.6) {
-      events.push(this.#off(s));
-      // The finger is now coming back up; re-anchor the rest position here.
-      s.baseline = Math.min(s.baseline, rel);
-    }
-  }
-
-  #tapKey(tip, kb) {
-    const r = kb.rect;
-    if (tip.x < r.x || tip.x > r.x + r.w) return null;
-    // Fingers may hover above the drawn keyboard: anything up to one keyboard
-    // height above it maps to the upper (black key) part of the keys.
-    if (tip.y < r.y - r.h || tip.y > r.y + r.h * 1.2) return null;
-    const y = clamp(tip.y, r.y + 1, r.y + r.h - 1);
-    return kb.hitTest(tip.x, y);
   }
 }

@@ -1,4 +1,4 @@
-import { Keyboard, noteName } from './keyboard.js';
+import { Keyboard, noteName, BLACK_KEY_HEIGHT, KEY_THICKNESS, KEY_TRAVEL } from './keyboard.js';
 import { HandTracker } from './hands.js';
 import { PressDetector, FINGERTIPS } from './detector.js';
 import { PianoAudio } from './audio.js';
@@ -10,33 +10,37 @@ const HAND_CONNECTIONS = [
   [0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8], [5, 9], [9, 10], [10, 11], [11, 12],
   [9, 13], [13, 14], [14, 15], [15, 16], [13, 17], [0, 17], [17, 18], [18, 19], [19, 20],
 ];
-const DEFAULT_RECTS = {
-  landscape: { x: 0.06, y: 0.6, w: 0.88, h: 0.3 },
-  portrait: { x: 0.03, y: 0.64, w: 0.94, h: 0.2 },
+// Keyboard placement as fractions of the screen: cx/w of the width, fy/d of the height.
+const DEFAULT_PLACEMENT = {
+  landscape: { cx: 0.5, fy: 0.94, w: 0.84, d: 0.55 },
+  portrait: { cx: 0.5, fy: 0.9, w: 0.94, d: 0.3 },
 };
-const STORAGE_KEY = 'air-piano-settings-v1';
+const DEFAULT_TILT = 55; // degrees
+const HOVER_SLACK = 0.35; // fingertips this far (in key lengths) behind/in front of the keys still aim at them
+const STORAGE_KEY = 'air-piano-settings-v2';
 
 // ---------------------------------------------------------------- settings
 
 const defaults = {
-  mode: 'touch',
   instrument: 'synth',
   octaves: matchMedia('(orientation: portrait)').matches ? 1 : 2,
   startNote: 60,
   sensitivity: 5,
   volume: 0.8,
+  opacity: 0.85,
   useThumbs: true,
   skeleton: false,
   labels: true,
   mirror: true,
   facingMode: 'user',
-  rects: { ...DEFAULT_RECTS },
+  tilt: DEFAULT_TILT,
+  placement: { ...DEFAULT_PLACEMENT },
 };
 
 function loadSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-    return { ...defaults, ...saved, rects: { ...DEFAULT_RECTS, ...saved.rects } };
+    return { ...defaults, ...saved, placement: { ...DEFAULT_PLACEMENT, ...saved.placement } };
   } catch {
     return { ...defaults };
   }
@@ -55,17 +59,15 @@ const settings = loadSettings();
 const $ = (sel) => document.querySelector(sel);
 const canvas = $('#stage');
 const ctx = canvas.getContext('2d');
+const layer = document.createElement('canvas');
+const layerCtx = layer.getContext('2d');
 const video = $('#video');
 
 const audio = new PianoAudio();
 const camera = new Camera(video);
 const handDetector = new HandDetector();
 const tracker = new HandTracker({ filter: { minCutoff: 2.0, beta: 0.015 } });
-const detector = new PressDetector({
-  mode: settings.mode,
-  sensitivity: settings.sensitivity,
-  useThumbs: settings.useThumbs,
-});
+const detector = new PressDetector({ sensitivity: settings.sensitivity, useThumbs: settings.useThumbs });
 let keyboard = new Keyboard({ startNote: settings.startNote, octaves: settings.octaves });
 
 const view = { w: 0, h: 0, dpr: 1, orientation: 'landscape' };
@@ -75,11 +77,13 @@ let trackingOn = false;
 let editing = false;
 let lastVideoTime = -1;
 let lastHandsSeen = 0;
+let notesPlayed = 0;
 let fps = 0;
 let statusOverride = '';
 const ripples = []; // visual feedback for note-ons
 const pointerNotes = new Map(); // pointerId -> note (playing by touching the screen)
 const sourceNotes = new Map(); // source id -> { note, color }
+const keyDepth = new Map(); // note -> 0..1 animated key press depth
 
 // ---------------------------------------------------------------- geometry
 
@@ -90,21 +94,35 @@ function resize() {
   view.orientation = view.w >= view.h ? 'landscape' : 'portrait';
   canvas.width = Math.round(view.w * view.dpr);
   canvas.height = Math.round(view.h * view.dpr);
+  layer.width = canvas.width;
+  layer.height = canvas.height;
   layoutKeyboard();
 }
 
-function currentRect() {
-  return settings.rects[view.orientation] ?? DEFAULT_RECTS[view.orientation];
+function currentPlacement() {
+  return settings.placement[view.orientation] ?? DEFAULT_PLACEMENT[view.orientation];
+}
+
+function setPlacement(p) {
+  settings.placement = { ...settings.placement, [view.orientation]: p };
+  layoutKeyboard();
 }
 
 function layoutKeyboard() {
-  const r = currentRect();
-  keyboard.layout({ x: r.x * view.w, y: r.y * view.h, w: r.w * view.w, h: r.h * view.h });
+  const p = currentPlacement();
+  keyboard.place({
+    cx: p.cx * view.w,
+    fy: p.fy * view.h,
+    width: p.w * view.w,
+    depth: p.d * view.h,
+    tilt: (settings.tilt * Math.PI) / 180,
+  });
 }
 
 function rebuildKeyboard() {
   applyEvents(detector.releaseAll());
   keyboard = new Keyboard({ startNote: settings.startNote, octaves: settings.octaves });
+  keyDepth.clear();
   layoutKeyboard();
   if (settings.instrument === 'grand') loadInstrument();
 }
@@ -131,6 +149,7 @@ function applyEvents(events) {
       audio.noteOn(e.note, e.velocity, e.id);
       sourceNotes.set(e.id, { note: e.note, color });
       ripples.push({ x: e.x, y: e.y, t: performance.now(), color, note: e.note });
+      notesPlayed++;
     } else {
       audio.noteOff(e.note, e.id);
       sourceNotes.delete(e.id);
@@ -160,30 +179,31 @@ function processVideoFrame(now) {
   const screenHands = detections.map((d) => ({ ...d, points: d.points.map((p) => toScreen(p, tf)) }));
   hands = tracker.update(screenHands, now / 1000);
   if (hands.length) lastHandsSeen = now;
-  applyEvents(detector.update(hands, keyboard, now / 1000));
+  if (!editing) applyEvents(detector.update(hands, keyboard, now / 1000));
 }
 
 let lastFrame = performance.now();
 function frame(now) {
   requestAnimationFrame(frame);
-  const dt = now - lastFrame;
+  const dt = Math.min(0.1, (now - lastFrame) / 1000);
   lastFrame = now;
-  if (dt > 0) fps += (1000 / dt - fps) * 0.05;
+  if (dt > 0) fps += (1 / dt - fps) * 0.05;
   processVideoFrame(now);
-  draw(now);
+  draw(now, dt);
   updateStatus(now);
 }
 
 function updateStatus(now) {
   let text = statusOverride;
-  if (!text && editing) text = 'Drag to move the keyboard, drag the corner to resize';
+  if (!text && editing) text = 'Drag the keyboard to move it, use the handles to resize it';
   else if (!text && trackingOn && now - lastHandsSeen > 1500) text = 'Show your hands to the camera';
+  else if (!text && trackingOn && notesPlayed === 0 && hands.length) text = 'Fingers over the keys, then tap down quickly with one finger';
   if ($('#status').textContent !== text) $('#status').textContent = text;
 }
 
 // ---------------------------------------------------------------- drawing
 
-function draw(now) {
+function draw(now, dt) {
   const { w, h, dpr } = view;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = '#101418';
@@ -199,75 +219,191 @@ function draw(now) {
     ctx.drawImage(video, 0, 0);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     // Darken slightly so the keyboard and fingertips stand out.
-    ctx.fillStyle = 'rgba(0,0,0,0.18)';
+    ctx.fillStyle = 'rgba(0,0,0,0.15)';
     ctx.fillRect(0, 0, w, h);
   }
 
-  drawKeyboard(now);
+  const pressed = pressedKeys();
+  animateKeys(pressed, dt);
+  // Draw the keyboard opaque on its own layer, then blend the whole layer, so
+  // overlapping key faces don't show through each other.
+  layerCtx.setTransform(1, 0, 0, 1, 0, 0);
+  layerCtx.clearRect(0, 0, layer.width, layer.height);
+  layerCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawKeyboard(layerCtx, pressed, hoveredKeys());
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = settings.opacity;
+  ctx.drawImage(layer, 0, 0);
+  ctx.restore();
   drawHands();
   drawRipples(now);
   if (editing) drawEditHandles();
 }
 
-function roundRectPath(x, y, rw, rh, r) {
-  ctx.beginPath();
-  if (ctx.roundRect) ctx.roundRect(x, y, rw, rh, r);
-  else ctx.rect(x, y, rw, rh);
+function animateKeys(pressed, dt) {
+  for (const k of keyboard.keys) {
+    const target = pressed.has(k.note) ? 1 : 0;
+    const cur = keyDepth.get(k.note) ?? 0;
+    if (cur === target) continue;
+    // Keys go down fast and come back up a little slower, like real keys.
+    const speed = target > cur ? 40 : 18;
+    const next = cur + (target - cur) * Math.min(1, dt * speed);
+    keyDepth.set(k.note, Math.abs(next - target) < 0.01 ? target : next);
+  }
 }
 
-function drawKeyboard() {
-  const pressed = pressedKeys();
-  const r = keyboard.rect;
-  const radius = Math.min(8, keyboard.whiteKeyWidth * 0.15);
-
-  // Hover zone for tap mode: fingers above the keys can still play them.
-  if (settings.mode === 'tap') {
-    const g = ctx.createLinearGradient(0, r.y - r.h, 0, r.y);
-    g.addColorStop(0, 'rgba(255,179,71,0)');
-    g.addColorStop(1, 'rgba(255,179,71,0.12)');
-    ctx.fillStyle = g;
-    ctx.fillRect(r.x, r.y - r.h, r.w, r.h);
+/** The key each fingertip is aiming at (shown as a faint highlight). */
+function hoveredKeys() {
+  const hovered = new Map();
+  if (editing) return hovered;
+  for (const hand of hands) {
+    FINGERTIPS.forEach((tipIndex, f) => {
+      if (f === 0 && !settings.useThumbs) return;
+      const p = hand.points[tipIndex];
+      const key = keyboard.hitTest(p.x, p.y, HOVER_SLACK);
+      if (key && !hovered.has(key.note)) hovered.set(key.note, FINGER_COLORS[f]);
+    });
   }
+  return hovered;
+}
 
-  for (const k of keyboard.whiteKeys) {
+function quad(g, points) {
+  g.beginPath();
+  g.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) g.lineTo(points[i].x, points[i].y);
+  g.closePath();
+}
+
+function drawKeyboard(g, pressed, hovered) {
+  const kb = keyboard;
+  const P = (u, v, h) => kb.project(u, v, h);
+  const gap = kb.whiteKeyU * 0.05;
+  const base = -KEY_THICKNESS;
+
+  // Soft shadow on the "table" under the keyboard.
+  g.save();
+  g.shadowColor = 'rgba(0,0,0,0.55)';
+  g.shadowBlur = 24;
+  g.shadowOffsetY = 10;
+  quad(g, [P(-0.01, -0.01, base - 0.02), P(1.01, -0.01, base - 0.02), P(1.01, 1.05, base - 0.02), P(-0.01, 1.05, base - 0.02)]);
+  g.fillStyle = 'rgba(20,20,24,0.9)';
+  g.fill();
+  g.restore();
+
+  // Case: back panel standing behind the keys, and the body under them.
+  const backTop = 0.16;
+  quad(g, [P(-0.012, 1, base), P(1.012, 1, base), P(1.012, 1, backTop), P(-0.012, 1, backTop)]);
+  const backGrad = g.createLinearGradient(0, P(0.5, 1, backTop).y, 0, P(0.5, 1, 0).y);
+  backGrad.addColorStop(0, '#3a3540');
+  backGrad.addColorStop(1, '#141218');
+  g.fillStyle = backGrad;
+  g.fill();
+  quad(g, [P(-0.012, 1, backTop), P(1.012, 1, backTop), P(1.012, 1.06, backTop), P(-0.012, 1.06, backTop)]);
+  g.fillStyle = '#4a4452';
+  g.fill();
+  // Felt strip where the keys meet the back panel.
+  quad(g, [P(0, 0.985, 0.005), P(1, 0.985, 0.005), P(1, 1, 0.005), P(0, 1, 0.005)]);
+  g.fillStyle = '#7a1e2c';
+  g.fill();
+
+  // White keys: front face, then top face.
+  const front = P(0.5, 0, 0).y;
+  const back = P(0.5, 1, 0).y;
+  for (const k of kb.whiteKeys) {
+    const depth = keyDepth.get(k.note) ?? 0;
+    const top = -depth * KEY_TRAVEL;
+    const u0 = k.u0 + gap / 2;
+    const u1 = k.u1 - gap / 2;
     const color = pressed.get(k.note);
-    roundRectPath(k.x + 1, k.y, k.w - 2, k.h, [0, 0, radius, radius]);
-    ctx.fillStyle = color ? withAlpha(color, 0.85) : 'rgba(255,255,255,0.42)';
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-  }
-  for (const k of keyboard.blackKeys) {
-    const color = pressed.get(k.note);
-    roundRectPath(k.x, k.y, k.w, k.h, [0, 0, radius * 0.6, radius * 0.6]);
-    ctx.fillStyle = color ? withAlpha(color, 0.95) : 'rgba(15,15,18,0.78)';
-    ctx.fill();
+
+    quad(g, [P(u0, 0, top), P(u1, 0, top), P(u1, 0, base), P(u0, 0, base)]);
+    g.fillStyle = color ? mix(color, '#000000', 0.35) : '#b9bec6';
+    g.fill();
+
+    quad(g, [P(u0, 0, top), P(u1, 0, top), P(u1, 1, top), P(u0, 1, top)]);
+    const grad = g.createLinearGradient(0, front, 0, back);
+    if (color) {
+      grad.addColorStop(0, mix(color, '#ffffff', 0.35));
+      grad.addColorStop(1, color);
+    } else {
+      grad.addColorStop(0, '#ffffff');
+      grad.addColorStop(1, '#dfe3e8');
+    }
+    g.fillStyle = grad;
+    g.fill();
+    const hover = !color && hovered.get(k.note);
+    if (hover) {
+      g.fillStyle = withAlpha(hover, 0.28);
+      g.fill();
+    }
+    g.strokeStyle = 'rgba(0,0,0,0.18)';
+    g.lineWidth = 1;
+    g.stroke();
   }
 
-  if (settings.labels) {
-    const fontSize = Math.max(9, Math.min(15, keyboard.whiteKeyWidth * 0.32));
-    ctx.font = `600 ${fontSize}px system-ui, sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'bottom';
-    for (const k of keyboard.whiteKeys) {
-      const name = noteName(k.note);
-      ctx.fillStyle = pressed.has(k.note) ? 'rgba(0,0,0,0.85)' : 'rgba(0,0,0,0.6)';
-      ctx.fillText(k.note % 12 === 0 ? name : name.replace(/\d+$/, ''), k.x + k.w / 2, k.y + k.h - 6);
+  if (settings.labels) drawLabels(g, pressed);
+
+  // Black keys: raised boxes. Sides first, then the front face, then the top.
+  for (const k of kb.blackKeys) {
+    const depth = keyDepth.get(k.note) ?? 0;
+    const top = BLACK_KEY_HEIGHT - depth * KEY_TRAVEL;
+    const color = pressed.get(k.note);
+    const hover = !color && hovered.get(k.note);
+    const { u0, u1, v0 } = k;
+    const inset = (u1 - u0) * 0.12; // tops are narrower than the base
+    const tv0 = v0 + 0.03;
+
+    g.fillStyle = '#050506';
+    quad(g, [P(u0, v0, 0), P(u0, 1, 0), P(u0 + inset, 1, top), P(u0 + inset, tv0, top)]);
+    g.fill();
+    quad(g, [P(u1, v0, 0), P(u1, 1, 0), P(u1 - inset, 1, top), P(u1 - inset, tv0, top)]);
+    g.fill();
+
+    quad(g, [P(u0, v0, 0), P(u1, v0, 0), P(u1 - inset, tv0, top), P(u0 + inset, tv0, top)]);
+    g.fillStyle = color ? mix(color, '#000000', 0.45) : '#2b2b31';
+    g.fill();
+
+    quad(g, [P(u0 + inset, tv0, top), P(u1 - inset, tv0, top), P(u1 - inset, 1, top), P(u0 + inset, 1, top)]);
+    const grad = g.createLinearGradient(0, P(0.5, tv0, top).y, 0, P(0.5, 1, top).y);
+    if (color) {
+      grad.addColorStop(0, mix(color, '#ffffff', 0.2));
+      grad.addColorStop(1, mix(color, '#000000', 0.3));
+    } else {
+      grad.addColorStop(0, '#4a4a52');
+      grad.addColorStop(1, '#141417');
+    }
+    g.fillStyle = grad;
+    g.fill();
+    if (hover) {
+      g.fillStyle = withAlpha(hover, 0.45);
+      g.fill();
     }
   }
+}
 
-  // The "surface" line: crossing it presses keys in touch mode.
-  ctx.strokeStyle = settings.mode === 'touch' ? 'rgba(255,179,71,0.95)' : 'rgba(255,255,255,0.5)';
-  ctx.lineWidth = settings.mode === 'touch' ? 3 : 1.5;
-  ctx.beginPath();
-  ctx.moveTo(r.x, r.y);
-  ctx.lineTo(r.x + r.w, r.y);
-  ctx.stroke();
+function drawLabels(g, pressed) {
+  const kb = keyboard;
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  for (const k of kb.whiteKeys) {
+    const depth = keyDepth.get(k.note) ?? 0;
+    const p = kb.project((k.u0 + k.u1) / 2, 0.12, -depth * KEY_TRAVEL);
+    const keyWidth = (k.u1 - k.u0) * kb.placement.width * p.s;
+    const size = Math.max(8, Math.min(16, keyWidth * 0.34));
+    g.font = `600 ${size}px system-ui, sans-serif`;
+    const name = noteName(k.note);
+    g.fillStyle = pressed.has(k.note) ? 'rgba(0,0,0,0.8)' : k.note % 12 === 0 ? 'rgba(0,0,0,0.6)' : 'rgba(0,0,0,0.38)';
+    // Squash the text vertically so it looks like it lies on the key.
+    g.save();
+    g.translate(p.x, p.y);
+    g.scale(1, Math.max(0.45, Math.cos(kb.placement.tilt)));
+    g.fillText(k.note % 12 === 0 ? name : name.replace(/\d+$/, ''), 0, 0);
+    g.restore();
+  }
 }
 
 function drawHands() {
-  const active = new Set(detector.activeFingers.map((s) => s.id));
   for (const hand of hands) {
     if (settings.skeleton) {
       ctx.strokeStyle = 'rgba(255,255,255,0.55)';
@@ -282,15 +418,26 @@ function drawHands() {
     FINGERTIPS.forEach((tipIndex, f) => {
       if (f === 0 && !settings.useThumbs) return;
       const p = hand.points[tipIndex];
-      const on = active.has(`${hand.id}:${f}`);
-      const radius = on ? 11 : 7;
+      const state = detector.finger(`${hand.id}:${f}`);
+      const on = state?.note != null;
+      const color = FINGER_COLORS[f];
+      const radius = on ? 10 : 7;
       ctx.beginPath();
       ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
-      ctx.fillStyle = on ? FINGER_COLORS[f] : withAlpha(FINGER_COLORS[f], 0.35);
+      ctx.fillStyle = on ? color : withAlpha(color, 0.4);
       ctx.fill();
       ctx.lineWidth = 2;
-      ctx.strokeStyle = on ? '#fff' : FINGER_COLORS[f];
+      ctx.strokeStyle = on ? '#fff' : color;
       ctx.stroke();
+      // Ring that fills up as the finger gets closer to a press.
+      const progress = on ? 1 : state?.progress ?? 0;
+      if (progress > 0.05) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, radius + 5, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+        ctx.strokeStyle = on ? '#ffffff' : withAlpha(color, 0.9);
+        ctx.lineWidth = 3;
+        ctx.stroke();
+      }
     });
   }
 }
@@ -304,7 +451,7 @@ function drawRipples(now) {
       continue;
     }
     ctx.beginPath();
-    ctx.arc(rp.x, rp.y, 10 + age * 30, 0, Math.PI * 2);
+    ctx.arc(rp.x, rp.y, 12 + age * 30, 0, Math.PI * 2);
     ctx.strokeStyle = withAlpha(rp.color, 1 - age);
     ctx.lineWidth = 3;
     ctx.stroke();
@@ -312,35 +459,104 @@ function drawRipples(now) {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'bottom';
     ctx.fillStyle = withAlpha('#ffffff', 1 - age);
-    ctx.fillText(noteName(rp.note), rp.x, rp.y - 16 - age * 20);
+    ctx.fillText(noteName(rp.note), rp.x, rp.y - 18 - age * 20);
   }
 }
 
-const HANDLE = 26;
-function handleRect() {
-  const r = keyboard.rect;
-  return { x: r.x + r.w - HANDLE / 2, y: r.y + r.h - HANDLE / 2, w: HANDLE, h: HANDLE };
+// ---------------------------------------------------------------- adjusting the keyboard
+
+const HANDLE_RADIUS = 13;
+
+function handles() {
+  return {
+    width: keyboard.project(1, 0, -KEY_THICKNESS),
+    depth: keyboard.project(0.5, 1, 0.16),
+  };
 }
 
 function drawEditHandles() {
-  const r = keyboard.rect;
+  const outline = keyboard.outline();
   ctx.setLineDash([8, 6]);
   ctx.strokeStyle = '#ffb347';
   ctx.lineWidth = 2;
-  ctx.strokeRect(r.x - 4, r.y - 4, r.w + 8, r.h + 8);
+  quad(ctx, outline);
+  ctx.stroke();
   ctx.setLineDash([]);
-  const hr = handleRect();
+  const hs = handles();
+  drawHandle(hs.width, '↔');
+  drawHandle(hs.depth, '↕');
+}
+
+function drawHandle(p, glyph) {
   ctx.beginPath();
-  ctx.arc(hr.x + HANDLE / 2, hr.y + HANDLE / 2, HANDLE / 2, 0, Math.PI * 2);
+  ctx.arc(p.x, p.y, HANDLE_RADIUS, 0, Math.PI * 2);
   ctx.fillStyle = '#ffb347';
   ctx.fill();
   ctx.strokeStyle = '#1d1406';
+  ctx.lineWidth = 2;
   ctx.stroke();
+  ctx.fillStyle = '#1d1406';
+  ctx.font = '700 14px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(glyph, p.x, p.y + 1);
 }
 
-function withAlpha(hex, a) {
-  const n = parseInt(hex.slice(1), 16);
-  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+/** Key length (as a fraction of the screen height) that puts the back edge at screen y. */
+function depthForBackEdge(y) {
+  const p = currentPlacement();
+  let lo = 0.05;
+  let hi = 2;
+  const probe = new Keyboard({ startNote: 60, octaves: 1 });
+  for (let i = 0; i < 30; i++) {
+    const mid = (lo + hi) / 2;
+    probe.place({ cx: p.cx * view.w, fy: p.fy * view.h, width: p.w * view.w, depth: mid * view.h, tilt: keyboard.placement.tilt });
+    if (probe.project(0.5, 1, 0.16).y > y) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+function startEditDrag(e) {
+  const x = e.clientX;
+  const y = e.clientY;
+  const hs = handles();
+  const near = (p) => Math.hypot(p.x - x, p.y - y) <= HANDLE_RADIUS + 14;
+  let kind = null;
+  if (near(hs.width)) kind = 'width';
+  else if (near(hs.depth)) kind = 'depth';
+  else if (keyboard.hitTest(x, y, 0.2)) kind = 'move';
+  if (!kind) return null;
+  return { id: e.pointerId, kind, x, y, start: { ...currentPlacement() } };
+}
+
+function moveEditDrag(drag, e) {
+  const x = e.clientX;
+  const y = e.clientY;
+  const p = { ...drag.start };
+  if (drag.kind === 'move') {
+    p.cx = clamp(p.cx + (x - drag.x) / view.w, 0.1, 0.9);
+    p.fy = clamp(p.fy + (y - drag.y) / view.h, 0.2, 1.05);
+  } else if (drag.kind === 'width') {
+    p.w = clamp((2 * Math.abs(x - p.cx * view.w)) / view.w, 0.2, 1.2);
+  } else {
+    p.d = clamp(depthForBackEdge(y), 0.08, 1.6);
+  }
+  setPlacement(p);
+}
+
+function clamp(v, lo, hi) {
+  return Math.min(hi, Math.max(lo, v));
+}
+
+function setEditing(on) {
+  editing = on;
+  $('#btn-edit').setAttribute('aria-pressed', String(on));
+  $('#editbar').hidden = !on;
+  if (on) {
+    applyEvents(detector.releaseAll());
+    toggleSettings(false);
+  }
 }
 
 // ---------------------------------------------------------------- pointer input
@@ -348,51 +564,32 @@ function withAlpha(hex, a) {
 let drag = null;
 
 canvas.addEventListener('pointerdown', (e) => {
-  const x = e.clientX;
-  const y = e.clientY;
   if (editing) {
-    const hr = handleRect();
-    const onHandle = x >= hr.x - 10 && x <= hr.x + hr.w + 10 && y >= hr.y - 10 && y <= hr.y + hr.h + 10;
-    if (onHandle || keyboard.contains(x, y)) {
-      drag = { id: e.pointerId, kind: onHandle ? 'resize' : 'move', x, y, rect: { ...currentRect() } };
-      canvas.setPointerCapture(e.pointerId);
-    }
+    drag = startEditDrag(e);
+    if (drag) canvas.setPointerCapture(e.pointerId);
     return;
   }
-  const key = keyboard.hitTest(x, y);
+  const key = keyboard.hitTest(e.clientX, e.clientY);
   if (!key) return;
   canvas.setPointerCapture(e.pointerId);
   audio.start().catch(() => {});
   pointerNotes.set(e.pointerId, key.note);
-  applyEvents([{ type: 'on', id: `p${e.pointerId}`, note: key.note, velocity: 0.7, finger: -1, x, y }]);
+  applyEvents([{ type: 'on', id: `p${e.pointerId}`, note: key.note, velocity: 0.7, finger: -1, x: e.clientX, y: e.clientY }]);
 });
 
 canvas.addEventListener('pointermove', (e) => {
-  const x = e.clientX;
-  const y = e.clientY;
   if (drag && drag.id === e.pointerId) {
-    const dx = (x - drag.x) / view.w;
-    const dy = (y - drag.y) / view.h;
-    const r = { ...drag.rect };
-    if (drag.kind === 'move') {
-      r.x = Math.min(1 - r.w, Math.max(0, r.x + dx));
-      r.y = Math.min(1 - r.h, Math.max(0, r.y + dy));
-    } else {
-      r.w = Math.min(1 - r.x, Math.max(0.15, r.w + dx));
-      r.h = Math.min(1 - r.y, Math.max(0.08, r.h + dy));
-    }
-    settings.rects = { ...settings.rects, [view.orientation]: r };
-    layoutKeyboard();
+    moveEditDrag(drag, e);
     return;
   }
   if (!pointerNotes.has(e.pointerId)) return;
-  const key = keyboard.hitTest(x, y);
+  const key = keyboard.hitTest(e.clientX, e.clientY);
   const current = pointerNotes.get(e.pointerId);
   if (key && key.note !== current) {
     const id = `p${e.pointerId}`;
     applyEvents([
-      { type: 'off', id, note: current, finger: -1, x, y },
-      { type: 'on', id, note: key.note, velocity: 0.7, finger: -1, x, y },
+      { type: 'off', id, note: current, finger: -1, x: e.clientX, y: e.clientY },
+      { type: 'on', id, note: key.note, velocity: 0.7, finger: -1, x: e.clientX, y: e.clientY },
     ]);
     pointerNotes.set(e.pointerId, key.note);
   }
@@ -414,19 +611,25 @@ canvas.addEventListener('pointercancel', endPointer);
 
 // ---------------------------------------------------------------- UI wiring
 
-function setPressed(btn, on) {
-  btn.setAttribute('aria-pressed', String(on));
-}
-
 $('#btn-sustain').addEventListener('click', (e) => {
   audio.setSustain(!audio.sustain);
-  setPressed(e.currentTarget, audio.sustain);
+  e.currentTarget.setAttribute('aria-pressed', String(audio.sustain));
 });
 
-$('#btn-edit').addEventListener('click', (e) => {
-  editing = !editing;
-  setPressed(e.currentTarget, editing);
-  if (editing) applyEvents(detector.releaseAll());
+$('#btn-edit').addEventListener('click', () => setEditing(!editing));
+$('#btn-edit-done').addEventListener('click', () => setEditing(false));
+
+$('#set-tilt').addEventListener('input', (e) => {
+  settings.tilt = Number(e.target.value);
+  layoutKeyboard();
+  saveSettings();
+});
+
+$('#btn-reset-keyboard').addEventListener('click', () => {
+  settings.tilt = DEFAULT_TILT;
+  $('#set-tilt').value = String(settings.tilt);
+  setPlacement({ ...DEFAULT_PLACEMENT[view.orientation] });
+  saveSettings();
 });
 
 $('#btn-flip').addEventListener('click', async () => {
@@ -448,30 +651,27 @@ function toggleSettings(open) {
   $('#settings').hidden = !open;
   $('#btn-settings').setAttribute('aria-expanded', String(open));
 }
-$('#btn-settings').addEventListener('click', () => toggleSettings($('#settings').hidden));
+$('#btn-settings').addEventListener('click', () => {
+  const open = $('#settings').hidden;
+  if (open && editing) setEditing(false);
+  toggleSettings(open);
+});
 $('#btn-close-settings').addEventListener('click', () => toggleSettings(false));
 
 function syncForm() {
-  document.querySelectorAll('input[name="mode"]').forEach((el) => { el.checked = el.value === settings.mode; });
-  document.querySelectorAll('[data-mode-hint]').forEach((el) => { el.hidden = el.dataset.modeHint !== settings.mode; });
   $('#set-instrument').value = settings.instrument;
   $('#set-octaves').value = String(settings.octaves);
   $('#set-start').value = String(settings.startNote);
   $('#set-sensitivity').value = String(settings.sensitivity);
   $('#out-sensitivity').textContent = settings.sensitivity;
+  $('#set-opacity').value = String(settings.opacity);
   $('#set-volume').value = String(settings.volume);
+  $('#set-tilt').value = String(settings.tilt);
   $('#set-thumbs').checked = settings.useThumbs;
   $('#set-skeleton').checked = settings.skeleton;
   $('#set-labels').checked = settings.labels;
   $('#set-mirror').checked = settings.mirror;
 }
-
-document.querySelectorAll('input[name="mode"]').forEach((el) => el.addEventListener('change', () => {
-  settings.mode = el.value;
-  applyEvents(detector.setMode(settings.mode));
-  syncForm();
-  saveSettings();
-}));
 
 $('#set-instrument').addEventListener('change', (e) => {
   settings.instrument = e.target.value;
@@ -498,6 +698,11 @@ $('#set-sensitivity').addEventListener('input', (e) => {
   saveSettings();
 });
 
+$('#set-opacity').addEventListener('input', (e) => {
+  settings.opacity = Number(e.target.value);
+  saveSettings();
+});
+
 $('#set-volume').addEventListener('input', (e) => {
   settings.volume = Number(e.target.value);
   audio.setVolume(settings.volume);
@@ -521,12 +726,6 @@ for (const [id, key] of [['#set-skeleton', 'skeleton'], ['#set-labels', 'labels'
     saveSettings();
   });
 }
-
-$('#btn-reset-keyboard').addEventListener('click', () => {
-  settings.rects = { ...settings.rects, [view.orientation]: { ...DEFAULT_RECTS[view.orientation] } };
-  layoutKeyboard();
-  saveSettings();
-});
 
 let statusTimer = 0;
 function flashStatus(text, ms = 3000) {
@@ -556,12 +755,24 @@ async function loadInstrument() {
   }
 }
 
+function withAlpha(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+}
+
+/** Mixes two #rrggbb colors; k = 0 gives a, k = 1 gives b. */
+function mix(a, b, k) {
+  const na = parseInt(a.slice(1), 16);
+  const nb = parseInt(b.slice(1), 16);
+  const ch = (shift) => Math.round(((na >> shift) & 255) * (1 - k) + ((nb >> shift) & 255) * k);
+  return `rgb(${ch(16)},${ch(8)},${ch(0)})`;
+}
+
 // ---------------------------------------------------------------- startup
 
-let wakeLock = null;
 async function keepScreenOn() {
   try {
-    wakeLock = await navigator.wakeLock?.request('screen');
+    await navigator.wakeLock?.request('screen');
   } catch { /* not supported or denied */ }
 }
 

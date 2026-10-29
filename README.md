@@ -18,20 +18,52 @@ camera ─► MediaPipe (21 landmarks per hand, up to 2 hands)
        ─► Web Audio      (synthesized piano, or sampled grand piano)
 ```
 
-A single camera can't measure true depth, so "is the finger touching the
-key?" has to be inferred. The app offers two ways to play:
+### When does a key play?
 
-| Mode | How you play | Best for |
-|---|---|---|
-| **Touch** (default) | The top edge of the keyboard (orange line) is the key surface. Lower a fingertip past it to press the key under it, and lift it back above the line to release. Slide sideways to move to the next key (glissando). Hysteresis keeps a finger resting on the line from flickering. | Hands hovering over the drawn keyboard, or a camera looking at a table from the front |
-| **Tap** | Hover over the keyboard and press by quickly bending a finger down, like playing a real piano in the air. The detector measures each fingertip relative to its own knuckle, so moving the whole hand never plays a note. Only a quick finger flex does. | Playing "in the air" in front of a tablet or laptop |
+A single camera can't measure true depth, so the app can't tell when a finger
+"touches" a key. Instead it looks for the **movement** of a key press: a quick,
+short downward tap of one finger. Just having fingertips over the keys never
+plays anything.
+
+For every finger the app tracks how far the fingertip is below its own knuckle,
+measured in hand sizes so it doesn't matter how close you are to the camera. A
+note plays when that value grows quickly (a downward stroke of about 1/6 of a
+hand size within 0.3 s). The note plays on the key under the fingertip and is
+released when the finger lifts again.
+
+The app ignores movements that aren't key presses:
+
+| Movement | Result |
+|---|---|
+| Fingers resting or hovering over the keys | nothing |
+| Moving, lowering or sliding the whole hand | nothing (tip and knuckle move together) |
+| Tilting the hand at the wrist (all fingers drop together) | nothing (shared movement is subtracted) |
+| Slowly curling a finger | nothing (the stroke must be quick) |
+| Swinging the hand fast | nothing (tracking is unreliable then) |
+| Two or three fingers tapping together | a chord |
+| A small bounce right after releasing | nothing (the finger must lift and press again) |
+
+A ring around each fingertip fills up as the finger gets close to a press. This
+shows what the app "feels" and helps when you tune the **Sensitivity** setting.
+
+### The 3D keyboard
+
+The keyboard is drawn in perspective, as if it were lying on a table in front of
+you. It has raised black keys, visible key fronts and a back panel, and pressed
+keys move down. The key under each fingertip is lightly highlighted so you can
+aim. In **Adjust** mode you can:
+
+- drag the keyboard to move it,
+- drag the ↔ handle to change its width,
+- drag the ↕ handle to change how long the keys are,
+- use the **Tilt** slider to make it lie flatter or stand up more.
 
 Other details:
 
 - **Velocity / dynamics:** how fast the finger moves when it presses sets the loudness and brightness of the note.
-- **Stuck-note protection:** if a hand leaves the frame, its notes are released after 150 ms. A hand that reappears already inside the keyboard won't play until the finger lifts.
+- **Stuck-note protection:** if a hand leaves the frame, its notes are released after 150 ms.
 - **Sustain pedal:** the *Pedal* button in the toolbar.
-- **Adjustable keyboard:** use *Adjust* to drag the keyboard anywhere and resize it from the corner handle. Portrait and landscape positions are saved separately.
+- **Adjustable keyboard:** portrait and landscape positions are saved separately. Keyboard opacity is a setting.
 - **1–4 octaves**, starting from C2 to C5. Fewer octaves give wider keys, which are easier to hit.
 - **Front or back camera**, with an optional mirrored selfie view.
 - **Touch the screen** to play the keys directly. This is useful for testing, or if no camera is available.
@@ -43,7 +75,8 @@ Other details:
 - Use good, even lighting and a background that contrasts with your hands.
 - Keep your whole hand in view, not just the fingertips. The tracker needs to see the palm.
 - Start with **1–2 octaves** and resize the keyboard so each key is about as wide as a finger in the picture.
-- If notes trigger by accident, lower **Sensitivity**. If presses are missed, raise it.
+- If notes trigger by accident, lower **Sensitivity**. If presses are missed, raise it, or make the tap a little bigger and quicker.
+- Fingers pointing towards the camera (palm down, like on a real piano) work best.
 - On iPhone/iPad, if you hear nothing, check the volume. The app asks Safari to play even in silent mode, but older iOS versions ignore that.
 
 ## Put it online (no commands needed)
@@ -77,8 +110,8 @@ There's no build step. The code is plain ES modules:
 | `js/vision.js` | Camera + MediaPipe hand landmarker |
 | `js/hands.js` | Frame-to-frame hand identity + landmark smoothing |
 | `js/filters.js` | One-Euro filter |
-| `js/detector.js` | Touch / tap press detection (pure logic) |
-| `js/keyboard.js` | Key layout, hit testing, note names (pure logic) |
+| `js/detector.js` | Key-press (finger stroke) detection (pure logic) |
+| `js/keyboard.js` | Key layout, 3D perspective projection, hit testing (pure logic) |
 | `js/audio.js` | Web Audio piano synth and sampler |
 
 Run the unit tests (Node 18+):
