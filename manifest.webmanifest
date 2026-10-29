@@ -1,0 +1,16 @@
+{
+  "name": "Air Piano",
+  "short_name": "Air Piano",
+  "description": "A virtual piano drawn on your camera image, played with your fingers.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "any",
+  "background_color": "#101418",
+  "theme_color": "#101418",
+  "icons": [
+    { "src": "assets/icon.svg", "sizes": "any", "type": "image/svg+xml" },
+    { "src": "assets/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "assets/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

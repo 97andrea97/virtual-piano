@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#101418">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="description" content="A virtual piano drawn on your camera image. Play it with your fingers in the air or on a table — works on phones, tablets and laptops.">
+  <title>Air Piano</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="assets/icon-180.png">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="stage"></canvas>
+
+  <header id="toolbar" hidden>
+    <div id="status" role="status" aria-live="polite"></div>
+    <div class="buttons">
+      <button id="btn-sustain" class="tool" aria-pressed="false" title="Sustain pedal">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 20h10M9 20l1.5-9h3L15 20M12 11V4"/></svg>
+        <span>Pedal</span>
+      </button>
+      <button id="btn-edit" class="tool" aria-pressed="false" title="Move / resize the keyboard">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3"/></svg>
+        <span>Adjust</span>
+      </button>
+      <button id="btn-flip" class="tool" title="Switch camera">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><path d="M9 13a3 3 0 0 1 5.2-2M15 13a3 3 0 0 1-5.2 2M14.5 9.5v1.7h-1.7M9.5 16.5v-1.7h1.7"/></svg>
+        <span>Camera</span>
+      </button>
+      <button id="btn-settings" class="tool" aria-expanded="false" aria-controls="settings" title="Settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        <span>Settings</span>
+      </button>
+    </div>
+  </header>
+
+  <aside id="settings" class="panel" hidden>
+    <div class="panel-head">
+      <h2>Settings</h2>
+      <button id="btn-close-settings" class="icon-btn" aria-label="Close settings">✕</button>
+    </div>
+
+    <fieldset class="field">
+      <legend>How to play</legend>
+      <div class="segmented" role="radiogroup">
+        <label><input type="radio" name="mode" value="touch"><span>Touch</span></label>
+        <label><input type="radio" name="mode" value="tap"><span>Tap</span></label>
+      </div>
+      <p class="hint" data-mode-hint="touch">Lower a fingertip past the top edge of the keyboard to press a key, lift it above the edge to release. Slide sideways for a glissando.</p>
+      <p class="hint" data-mode-hint="tap">Hover your hands over the keyboard and "press" by quickly bending a finger down, like playing a real piano. Moving the whole hand never plays.</p>
+    </fieldset>
+
+    <label class="field">
+      <span>Sound</span>
+      <select id="set-instrument">
+        <option value="synth">Synth piano (offline)</option>
+        <option value="grand">Grand piano (samples, needs internet)</option>
+      </select>
+    </label>
+
+    <div class="field-row">
+      <label class="field">
+        <span>Octaves</span>
+        <select id="set-octaves">
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Lowest key</span>
+        <select id="set-start">
+          <option value="36">C2</option>
+          <option value="48">C3</option>
+          <option value="60">C4 (middle C)</option>
+          <option value="72">C5</option>
+        </select>
+      </label>
+    </div>
+
+    <label class="field">
+      <span>Sensitivity <output id="out-sensitivity"></output></span>
+      <input id="set-sensitivity" type="range" min="1" max="10" step="1">
+    </label>
+
+    <label class="field">
+      <span>Volume</span>
+      <input id="set-volume" type="range" min="0" max="1" step="0.05">
+    </label>
+
+    <label class="check"><input id="set-thumbs" type="checkbox"> Play with thumbs</label>
+    <label class="check"><input id="set-skeleton" type="checkbox"> Show hand skeleton</label>
+    <label class="check"><input id="set-labels" type="checkbox"> Show note names</label>
+    <label class="check"><input id="set-mirror" type="checkbox"> Mirror image (selfie view)</label>
+
+    <button id="btn-reset-keyboard" class="secondary">Reset keyboard position</button>
+  </aside>
+
+  <section id="intro" class="overlay">
+    <div class="card">
+      <h1>Air Piano</h1>
+      <p>A piano drawn on your camera image. Your fingers are tracked by the camera — press the virtual keys and they play.</p>
+      <ol>
+        <li>Place your phone, tablet or laptop so the camera sees your hands.</li>
+        <li>Hold your hands above the keyboard drawn at the bottom of the picture.</li>
+        <li>Lower a fingertip onto a key to play it. Use <b>Adjust</b> to move or resize the keyboard.</li>
+      </ol>
+      <button id="btn-start" class="primary">Start playing</button>
+      <p class="small">Video is processed on your device and never uploaded. You can also tap the keys on screen.</p>
+      <p id="intro-error" class="error" hidden></p>
+    </div>
+  </section>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,320 @@
+:root {
+  --bg: #101418;
+  --panel: rgba(22, 27, 34, 0.92);
+  --panel-border: rgba(255, 255, 255, 0.12);
+  --text: #eef2f6;
+  --muted: #a7b1bd;
+  --accent: #ffb347;
+  --accent-ink: #1d1406;
+  --danger: #ff7b7b;
+  --radius: 14px;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#stage {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  touch-action: none;
+  display: block;
+}
+
+/* iOS only decodes frames of a video that is "visible", so keep it on screen
+   but invisible instead of display:none. */
+#video {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 2px;
+  height: 2px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+/* ---- toolbar ---- */
+
+#toolbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: max(10px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) 10px max(12px, env(safe-area-inset-left));
+  pointer-events: none;
+}
+
+#toolbar[hidden] { display: none; }
+
+#status {
+  align-self: center;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.45);
+  font-size: 13px;
+  color: var(--text);
+  max-width: 50vw;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#status:empty { visibility: hidden; }
+
+.buttons {
+  display: flex;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+.tool {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 56px;
+  padding: 7px 8px 5px;
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  font-size: 11px;
+}
+
+.tool svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tool[aria-pressed="true"], .tool[aria-expanded="true"] {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+}
+
+/* ---- settings panel ---- */
+
+.panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(340px, 100vw);
+  overflow-y: auto;
+  padding: max(16px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) 24px 18px;
+  background: var(--panel);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-left: 1px solid var(--panel-border);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  -webkit-user-select: auto;
+  user-select: auto;
+}
+
+.panel[hidden] { display: none; }
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.panel h2 { margin: 0; font-size: 18px; }
+
+.icon-btn {
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.field > span, .field legend {
+  font-size: 13px;
+  color: var(--muted);
+  padding: 0;
+}
+
+.field-row { display: flex; gap: 12px; }
+
+.field-row .field { flex: 1; }
+
+select, input[type="range"] {
+  width: 100%;
+  font: inherit;
+}
+
+select {
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+}
+
+input[type="range"] { accent-color: var(--accent); }
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.check input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.segmented {
+  display: flex;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.segmented label { flex: 1; }
+
+.segmented input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.segmented span {
+  display: block;
+  text-align: center;
+  padding: 8px;
+  cursor: pointer;
+}
+
+.segmented input:checked + span {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+.segmented input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.hint {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.hint[hidden] { display: none; }
+
+.secondary {
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* ---- intro ---- */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: radial-gradient(ellipse at top, #24303d, var(--bg) 70%);
+  overflow-y: auto;
+}
+
+.overlay[hidden] { display: none; }
+
+.card {
+  max-width: 460px;
+  width: 100%;
+  -webkit-user-select: auto;
+  user-select: auto;
+}
+
+.card h1 {
+  margin: 0 0 8px;
+  font-size: 34px;
+  letter-spacing: -0.02em;
+}
+
+.card ol {
+  padding-left: 20px;
+  color: var(--muted);
+}
+
+.card li { margin-bottom: 6px; }
+
+.primary {
+  width: 100%;
+  margin: 10px 0 6px;
+  padding: 14px;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.primary:disabled { opacity: 0.6; }
+
+.small { font-size: 13px; color: var(--muted); }
+
+.error { color: var(--danger); }
+
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+@media (max-width: 520px) {
+  .tool span { display: none; }
+  .tool { min-width: 44px; padding: 9px; }
+  #status {
+    max-width: calc(100vw - 230px);
+    white-space: normal;
+    font-size: 12px;
+    border-radius: 12px;
+  }
+}
